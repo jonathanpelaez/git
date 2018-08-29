@@ -63,6 +63,30 @@ test_expect_success '"checkout <submodule>" honors submodule.*.ignore from .git/
 	test_must_be_empty actual
 '
 
+test_expect_success 'setup superproject with historic submodule' '
+	test_create_repo super1 &&
+	test_create_repo sub1 &&
+	test_commit -C sub1 sub_content &&
+	git -C super1 submodule add ../sub1 &&
+	git -C super1 commit -a -m "sub1 added" &&
+	test_commit -C super1 historic_state &&
+	git -C super1 rm sub1 &&
+	git -C super1 commit -a -m "deleted sub" &&
+	test_commit -C super1 new_state &&
+	test_path_is_missing super1/sub &&
+
+	# The important part is to ensure sub1 is not in there any more.
+	# There is another series in flight, that may remove an
+	# empty .gitmodules file entirely.
+	test_must_be_empty super1/.gitmodules
+'
+
+test_expect_success 'checkout old state with deleted submodule' '
+	test_when_finished "rm -rf super1 sub1 super1_clone" &&
+	git clone --recurse-submodules super1 super1_clone &&
+	git -C super1_clone checkout --recurse-submodules historic_state
+'
+
 KNOWN_FAILURE_DIRECTORY_SUBMODULE_CONFLICTS=1
 test_submodule_switch_recursing_with_args "checkout"
 

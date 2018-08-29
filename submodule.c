@@ -1640,6 +1640,21 @@ int submodule_move_head(const char *path,
 			struct strbuf gitdir = STRBUF_INIT;
 			submodule_name_to_gitdir(&gitdir, the_repository,
 						 sub->name);
+			if (!is_git_directory(gitdir.buf)) {
+				/*
+				 * It is safe to assume we could just clone
+				 * the submodule here, as we passed the
+				 * is_submodule_active test above (i.e. the
+				 * user is interested in this submodule.
+				 *
+				 * However as this code path is exercised
+				 * for operations that typically do not involve
+				 * network operations, let's not do that for now.
+				 */
+				warning(_("Submodule '%s' missing"), path);
+				strbuf_release(&gitdir);
+				return 0;
+			}
 			connect_work_tree_and_git_dir(path, gitdir.buf, 0);
 			strbuf_release(&gitdir);
 
