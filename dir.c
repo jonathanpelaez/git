@@ -7,7 +7,6 @@
  * Copyright (C) Linus Torvalds, 2005-2006
  *		 Junio Hamano, 2005-2006
  */
-#define NO_THE_INDEX_COMPATIBILITY_MACROS
 #include "cache.h"
 #include "config.h"
 #include "dir.h"
@@ -276,37 +275,6 @@ static int do_read_blob(const struct object_id *oid, struct oid_stat *oid_stat,
 #define DO_MATCH_DIRECTORY (1<<1)
 #define DO_MATCH_SUBMODULE (1<<2)
 
-static int match_attrs(const struct index_state *istate,
-		       const char *name, int namelen,
-		       const struct pathspec_item *item)
-{
-	int i;
-
-	git_check_attr(istate, name, item->attr_check);
-	for (i = 0; i < item->attr_match_nr; i++) {
-		const char *value;
-		int matched;
-		enum attr_match_mode match_mode;
-
-		value = item->attr_check->items[i].value;
-		match_mode = item->attr_match[i].match_mode;
-
-		if (ATTR_TRUE(value))
-			matched = (match_mode == MATCH_SET);
-		else if (ATTR_FALSE(value))
-			matched = (match_mode == MATCH_UNSET);
-		else if (ATTR_UNSET(value))
-			matched = (match_mode == MATCH_UNSPECIFIED);
-		else
-			matched = (match_mode == MATCH_VALUE &&
-				   !strcmp(item->attr_match[i].value, value));
-		if (!matched)
-			return 0;
-	}
-
-	return 1;
-}
-
 /*
  * Does 'match' match the given name?
  * A match is found if
@@ -360,7 +328,8 @@ static int match_pathspec_item(const struct index_state *istate,
 	    strncmp(item->match, name - prefix, item->prefix))
 		return 0;
 
-	if (item->attr_match_nr && !match_attrs(istate, name, namelen, item))
+	if (item->attr_match_nr &&
+	    !match_pathspec_attrs(istate, name, namelen, item))
 		return 0;
 
 	/* If the match was just the prefix, we matched */
@@ -533,8 +502,7 @@ int submodule_path_match(const struct index_state *istate,
 }
 
 int report_path_error(const char *ps_matched,
-		      const struct pathspec *pathspec,
-		      const char *prefix)
+		      const struct pathspec *pathspec)
 {
 	/*
 	 * Make sure all pathspec matched; otherwise it is an error.
@@ -1282,7 +1250,7 @@ static void prep_exclude(struct dir_struct *dir,
 		 * order, though, if you do that.
 		 */
 		if (untracked &&
-		    oidcmp(&oid_stat.oid, &untracked->exclude_oid)) {
+		    !oideq(&oid_stat.oid, &untracked->exclude_oid)) {
 			invalidate_gitignore(dir->untracked, untracked);
 			oidcpy(&untracked->exclude_oid, &oid_stat.oid);
 		}
@@ -2248,12 +2216,12 @@ static struct untracked_cache_dir *validate_untracked_cache(struct dir_struct *d
 
 	/* Validate $GIT_DIR/info/exclude and core.excludesfile */
 	root = dir->untracked->root;
-	if (oidcmp(&dir->ss_info_exclude.oid,
+	if (!oideq(&dir->ss_info_exclude.oid,
 		   &dir->untracked->ss_info_exclude.oid)) {
 		invalidate_gitignore(dir->untracked, root);
 		dir->untracked->ss_info_exclude = dir->ss_info_exclude;
 	}
-	if (oidcmp(&dir->ss_excludes_file.oid,
+	if (!oideq(&dir->ss_excludes_file.oid,
 		   &dir->untracked->ss_excludes_file.oid)) {
 		invalidate_gitignore(dir->untracked, root);
 		dir->untracked->ss_excludes_file = dir->ss_excludes_file;
@@ -2268,10 +2236,13 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		   const char *path, int len, const struct pathspec *pathspec)
 {
 	struct untracked_cache_dir *untracked;
-	uint64_t start = getnanotime();
 
-	if (has_symlink_leading_path(path, len))
+	trace_performance_enter();
+
+	if (has_symlink_leading_path(path, len)) {
+		trace_performance_leave("read directory %.*s", len, path);
 		return dir->nr;
+	}
 
 	untracked = validate_untracked_cache(dir, len, pathspec);
 	if (!untracked)
@@ -2307,7 +2278,7 @@ int read_directory(struct dir_struct *dir, struct index_state *istate,
 		dir->nr = i;
 	}
 
-	trace_performance_since(start, "read directory %.*s", len, path);
+	trace_performance_leave("read directory %.*s", len, path);
 	if (dir->untracked) {
 		static int force_untracked_cache = -1;
 		static struct trace_key trace_untracked_stats = TRACE_KEY_INIT(UNTRACKED_STATS);
@@ -2573,13 +2544,9 @@ struct ondisk_untracked_cache {
 	struct stat_data info_exclude_stat;
 	struct stat_data excludes_file_stat;
 	uint32_t dir_flags;
-	unsigned char info_exclude_sha1[20];
-	unsigned char excludes_file_sha1[20];
-	char exclude_per_dir[FLEX_ARRAY];
 };
 
 #define ouc_offset(x) offsetof(struct ondisk_untracked_cache, x)
-#define ouc_size(len) (ouc_offset(exclude_per_dir) + len + 1)
 
 struct write_data {
 	int index;	   /* number of written untracked_cache_dir */
@@ -2662,20 +2629,21 @@ void write_untracked_extension(struct strbuf *out, struct untracked_cache *untra
 	struct write_data wd;
 	unsigned char varbuf[16];
 	int varint_len;
-	size_t len = strlen(untracked->exclude_per_dir);
+	const unsigned hashsz = the_hash_algo->rawsz;
 
-	FLEX_ALLOC_MEM(ouc, exclude_per_dir, untracked->exclude_per_dir, len);
+	ouc = xcalloc(1, sizeof(*ouc));
 	stat_data_to_disk(&ouc->info_exclude_stat, &untracked->ss_info_exclude.stat);
 	stat_data_to_disk(&ouc->excludes_file_stat, &untracked->ss_excludes_file.stat);
-	hashcpy(ouc->info_exclude_sha1, untracked->ss_info_exclude.oid.hash);
-	hashcpy(ouc->excludes_file_sha1, untracked->ss_excludes_file.oid.hash);
 	ouc->dir_flags = htonl(untracked->dir_flags);
 
 	varint_len = encode_varint(untracked->ident.len, varbuf);
 	strbuf_add(out, varbuf, varint_len);
 	strbuf_addbuf(out, &untracked->ident);
 
-	strbuf_add(out, ouc, ouc_size(len));
+	strbuf_add(out, ouc, sizeof(*ouc));
+	strbuf_add(out, untracked->ss_info_exclude.oid.hash, hashsz);
+	strbuf_add(out, untracked->ss_excludes_file.oid.hash, hashsz);
+	strbuf_add(out, untracked->exclude_per_dir, strlen(untracked->exclude_per_dir) + 1);
 	FREE_AND_NULL(ouc);
 
 	if (!untracked->root) {
@@ -2788,7 +2756,7 @@ static int read_one_dir(struct untracked_cache_dir **untracked_,
 	next = data + len + 1;
 	if (next > rd->end)
 		return -1;
-	*untracked_ = untracked = xmalloc(st_add(sizeof(*untracked), len));
+	*untracked_ = untracked = xmalloc(st_add3(sizeof(*untracked), len, 1));
 	memcpy(untracked, &ud, sizeof(ud));
 	memcpy(untracked->name, data, len + 1);
 	data = next;
@@ -2862,6 +2830,9 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	int ident_len;
 	ssize_t len;
 	const char *exclude_per_dir;
+	const unsigned hashsz = the_hash_algo->rawsz;
+	const unsigned offset = sizeof(struct ondisk_untracked_cache);
+	const unsigned exclude_per_dir_offset = offset + 2 * hashsz;
 
 	if (sz <= 1 || end[-1] != '\0')
 		return NULL;
@@ -2873,7 +2844,7 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	ident = (const char *)next;
 	next += ident_len;
 
-	if (next + ouc_size(0) > end)
+	if (next + exclude_per_dir_offset + 1 > end)
 		return NULL;
 
 	uc = xcalloc(1, sizeof(*uc));
@@ -2881,15 +2852,15 @@ struct untracked_cache *read_untracked_extension(const void *data, unsigned long
 	strbuf_add(&uc->ident, ident, ident_len);
 	load_oid_stat(&uc->ss_info_exclude,
 		      next + ouc_offset(info_exclude_stat),
-		      next + ouc_offset(info_exclude_sha1));
+		      next + offset);
 	load_oid_stat(&uc->ss_excludes_file,
 		      next + ouc_offset(excludes_file_stat),
-		      next + ouc_offset(excludes_file_sha1));
+		      next + offset + hashsz);
 	uc->dir_flags = get_be32(next + ouc_offset(dir_flags));
-	exclude_per_dir = (const char *)next + ouc_offset(exclude_per_dir);
+	exclude_per_dir = (const char *)next + exclude_per_dir_offset;
 	uc->exclude_per_dir = xstrdup(exclude_per_dir);
 	/* NUL after exclude_per_dir is covered by sizeof(*ouc) */
-	next += ouc_size(strlen(exclude_per_dir));
+	next += exclude_per_dir_offset + strlen(exclude_per_dir) + 1;
 	if (next >= end)
 		goto done2;
 

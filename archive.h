@@ -11,7 +11,7 @@ struct archiver_args {
 	const char *base;
 	size_t baselen;
 	struct tree *tree;
-	const unsigned char *commit_sha1;
+	const struct object_id *commit_oid;
 	const struct commit *commit;
 	timestamp_t time;
 	struct pathspec pathspec;
@@ -43,6 +43,7 @@ extern void register_archiver(struct archiver *);
 
 extern void init_tar_archiver(void);
 extern void init_zip_archiver(void);
+extern void init_archivers(void);
 
 typedef int (*write_archive_entry_fn_t)(struct archiver_args *args,
 					const struct object_id *oid,

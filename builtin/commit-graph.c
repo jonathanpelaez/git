@@ -42,6 +42,9 @@ static int graph_verify(int argc, const char **argv)
 {
 	struct commit_graph *graph = NULL;
 	char *graph_name;
+	int open_ok;
+	int fd;
+	struct stat st;
 
 	static struct option builtin_commit_graph_verify_options[] = {
 		OPT_STRING(0, "object-dir", &opts.obj_dir,
@@ -58,12 +61,18 @@ static int graph_verify(int argc, const char **argv)
 		opts.obj_dir = get_object_directory();
 
 	graph_name = get_commit_graph_filename(opts.obj_dir);
-	graph = load_commit_graph_one(graph_name);
+	open_ok = open_commit_graph(graph_name, &fd, &st);
+	if (!open_ok && errno == ENOENT)
+		return 0;
+	if (!open_ok)
+		die_errno(_("Could not open commit-graph '%s'"), graph_name);
+	graph = load_commit_graph_one_fd_st(fd, &st);
 	FREE_AND_NULL(graph_name);
 
 	if (!graph)
-		return 0;
+		return 1;
 
+	UNLEAK(graph);
 	return verify_commit_graph(the_repository, graph);
 }
 
@@ -71,6 +80,9 @@ static int graph_read(int argc, const char **argv)
 {
 	struct commit_graph *graph = NULL;
 	char *graph_name;
+	int open_ok;
+	int fd;
+	struct stat st;
 
 	static struct option builtin_commit_graph_read_options[] = {
 		OPT_STRING(0, "object-dir", &opts.obj_dir,
@@ -87,12 +99,14 @@ static int graph_read(int argc, const char **argv)
 		opts.obj_dir = get_object_directory();
 
 	graph_name = get_commit_graph_filename(opts.obj_dir);
-	graph = load_commit_graph_one(graph_name);
 
-	if (!graph) {
-		UNLEAK(graph_name);
-		die("graph file %s does not exist", graph_name);
-	}
+	open_ok = open_commit_graph(graph_name, &fd, &st);
+	if (!open_ok)
+		die_errno(_("Could not open commit-graph '%s'"), graph_name);
+
+	graph = load_commit_graph_one_fd_st(fd, &st);
+	if (!graph)
+		return 1;
 
 	FREE_AND_NULL(graph_name);
 
@@ -111,14 +125,16 @@ static int graph_read(int argc, const char **argv)
 		printf(" oid_lookup");
 	if (graph->chunk_commit_data)
 		printf(" commit_metadata");
-	if (graph->chunk_large_edges)
-		printf(" large_edges");
+	if (graph->chunk_extra_edges)
+		printf(" extra_edges");
 	printf("\n");
 
-	free_commit_graph(graph);
+	UNLEAK(graph);
 
 	return 0;
 }
+
+extern int read_replace_refs;
 
 static int graph_write(int argc, const char **argv)
 {
@@ -150,8 +166,10 @@ static int graph_write(int argc, const char **argv)
 	if (!opts.obj_dir)
 		opts.obj_dir = get_object_directory();
 
+	read_replace_refs = 0;
+
 	if (opts.reachable) {
-		write_commit_graph_reachable(opts.obj_dir, opts.append);
+		write_commit_graph_reachable(opts.obj_dir, opts.append, 1);
 		return 0;
 	}
 
@@ -166,14 +184,17 @@ static int graph_write(int argc, const char **argv)
 			pack_indexes = &lines;
 		if (opts.stdin_commits)
 			commit_hex = &lines;
+
+		UNLEAK(buf);
 	}
 
 	write_commit_graph(opts.obj_dir,
 			   pack_indexes,
 			   commit_hex,
-			   opts.append);
+			   opts.append,
+			   1);
 
-	string_list_clear(&lines, 0);
+	UNLEAK(lines);
 	return 0;
 }
 

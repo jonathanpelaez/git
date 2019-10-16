@@ -188,7 +188,7 @@ int ref_resolves_to_object(const char *refname,
 {
 	if (flags & REF_ISBROKEN)
 		return 0;
-	if (!has_sha1_file(oid->hash)) {
+	if (!has_object_file(oid)) {
 		error(_("%s does not point to a valid object!"), refname);
 		return 0;
 	}
@@ -217,6 +217,7 @@ char *resolve_refdup(const char *refname, int resolve_flags,
 /* The argument to filter_refs */
 struct ref_filter {
 	const char *pattern;
+	const char *prefix;
 	each_ref_fn *fn;
 	void *cb_data;
 };
@@ -296,6 +297,8 @@ static int filter_refs(const char *refname, const struct object_id *oid,
 
 	if (wildmatch(filter->pattern, refname, 0))
 		return 0;
+	if (filter->prefix)
+		skip_prefix(refname, filter->prefix, &refname);
 	return filter->fn(refname, oid, flags, filter->cb_data);
 }
 
@@ -458,6 +461,7 @@ int for_each_glob_ref_in(each_ref_fn fn, const char *pattern,
 	}
 
 	filter.pattern = real_pattern.buf;
+	filter.prefix = prefix;
 	filter.fn = fn;
 	filter.cb_data = cb_data;
 	ret = for_each_ref(filter_refs, &filter);
@@ -624,6 +628,7 @@ int dwim_log(const char *str, int len, struct object_id *oid, char **log)
 static int is_per_worktree_ref(const char *refname)
 {
 	return !strcmp(refname, "HEAD") ||
+		starts_with(refname, "refs/worktree/") ||
 		starts_with(refname, "refs/bisect/") ||
 		starts_with(refname, "refs/rewritten/");
 }
@@ -640,13 +645,34 @@ static int is_pseudoref_syntax(const char *refname)
 	return 1;
 }
 
+static int is_main_pseudoref_syntax(const char *refname)
+{
+	return skip_prefix(refname, "main-worktree/", &refname) &&
+		*refname &&
+		is_pseudoref_syntax(refname);
+}
+
+static int is_other_pseudoref_syntax(const char *refname)
+{
+	if (!skip_prefix(refname, "worktrees/", &refname))
+		return 0;
+	refname = strchr(refname, '/');
+	if (!refname || !refname[1])
+		return 0;
+	return is_pseudoref_syntax(refname + 1);
+}
+
 enum ref_type ref_type(const char *refname)
 {
 	if (is_per_worktree_ref(refname))
 		return REF_TYPE_PER_WORKTREE;
 	if (is_pseudoref_syntax(refname))
 		return REF_TYPE_PSEUDOREF;
-       return REF_TYPE_NORMAL;
+	if (is_main_pseudoref_syntax(refname))
+		return REF_TYPE_MAIN_PSEUDOREF;
+	if (is_other_pseudoref_syntax(refname))
+		return REF_TYPE_OTHER_PSEUDOREF;
+	return REF_TYPE_NORMAL;
 }
 
 long get_files_ref_lock_timeout_ms(void)
@@ -702,7 +728,7 @@ static int write_pseudoref(const char *pseudoref, const struct object_id *oid,
 				    pseudoref);
 			rollback_lock_file(&lock);
 			goto done;
-		} else if (oidcmp(&actual_old_oid, old_oid)) {
+		} else if (!oideq(&actual_old_oid, old_oid)) {
 			strbuf_addf(err, _("unexpected object ID when writing '%s'"),
 				    pseudoref);
 			rollback_lock_file(&lock);
@@ -744,7 +770,7 @@ static int delete_pseudoref(const char *pseudoref, const struct object_id *old_o
 		}
 		if (read_ref(pseudoref, &actual_old_oid))
 			die(_("could not read ref '%s'"), pseudoref);
-		if (oidcmp(&actual_old_oid, old_oid)) {
+		if (!oideq(&actual_old_oid, old_oid)) {
 			error(_("unexpected object ID when deleting '%s'"),
 			      pseudoref);
 			rollback_lock_file(&lock);
@@ -875,13 +901,13 @@ static int read_ref_at_ent(struct object_id *ooid, struct object_id *noid,
 		 */
 		if (!is_null_oid(&cb->ooid)) {
 			oidcpy(cb->oid, noid);
-			if (oidcmp(&cb->ooid, noid))
+			if (!oideq(&cb->ooid, noid))
 				warning(_("log for ref %s has gap after %s"),
 					cb->refname, show_date(cb->date, cb->tz, DATE_MODE(RFC2822)));
 		}
 		else if (cb->date == cb->at_time)
 			oidcpy(cb->oid, noid);
-		else if (oidcmp(noid, cb->oid))
+		else if (!oideq(noid, cb->oid))
 			warning(_("log for ref %s unexpectedly ended on %s"),
 				cb->refname, show_date(cb->date, cb->tz,
 						       DATE_MODE(RFC2822)));
@@ -1394,17 +1420,50 @@ struct ref_iterator *refs_ref_iterator_begin(
  * non-zero value, stop the iteration and return that value;
  * otherwise, return 0.
  */
-static int do_for_each_ref(struct ref_store *refs, const char *prefix,
-			   each_ref_fn fn, int trim, int flags, void *cb_data)
+static int do_for_each_repo_ref(struct repository *r, const char *prefix,
+				each_repo_ref_fn fn, int trim, int flags,
+				void *cb_data)
 {
 	struct ref_iterator *iter;
+	struct ref_store *refs = get_main_ref_store(r);
 
 	if (!refs)
 		return 0;
 
 	iter = refs_ref_iterator_begin(refs, prefix, trim, flags);
 
-	return do_for_each_ref_iterator(iter, fn, cb_data);
+	return do_for_each_repo_ref_iterator(r, iter, fn, cb_data);
+}
+
+struct do_for_each_ref_help {
+	each_ref_fn *fn;
+	void *cb_data;
+};
+
+static int do_for_each_ref_helper(struct repository *r,
+				  const char *refname,
+				  const struct object_id *oid,
+				  int flags,
+				  void *cb_data)
+{
+	struct do_for_each_ref_help *hp = cb_data;
+
+	return hp->fn(refname, oid, flags, hp->cb_data);
+}
+
+static int do_for_each_ref(struct ref_store *refs, const char *prefix,
+			   each_ref_fn fn, int trim, int flags, void *cb_data)
+{
+	struct ref_iterator *iter;
+	struct do_for_each_ref_help hp = { fn, cb_data };
+
+	if (!refs)
+		return 0;
+
+	iter = refs_ref_iterator_begin(refs, prefix, trim, flags);
+
+	return do_for_each_repo_ref_iterator(the_repository, iter,
+					do_for_each_ref_helper, &hp);
 }
 
 int refs_for_each_ref(struct ref_store *refs, each_ref_fn fn, void *cb_data)
@@ -1449,12 +1508,11 @@ int refs_for_each_fullref_in(struct ref_store *refs, const char *prefix,
 	return do_for_each_ref(refs, prefix, fn, 0, flag, cb_data);
 }
 
-int for_each_replace_ref(struct repository *r, each_ref_fn fn, void *cb_data)
+int for_each_replace_ref(struct repository *r, each_repo_ref_fn fn, void *cb_data)
 {
-	return do_for_each_ref(get_main_ref_store(r),
-			       git_replace_ref_base, fn,
-			       strlen(git_replace_ref_base),
-			       DO_FOR_EACH_INCLUDE_BROKEN, cb_data);
+	return do_for_each_repo_ref(r, git_replace_ref_base, fn,
+				    strlen(git_replace_ref_base),
+				    DO_FOR_EACH_INCLUDE_BROKEN, cb_data);
 }
 
 int for_each_namespaced_ref(each_ref_fn fn, void *cb_data)
@@ -2033,10 +2091,12 @@ cleanup:
 int refs_for_each_reflog(struct ref_store *refs, each_ref_fn fn, void *cb_data)
 {
 	struct ref_iterator *iter;
+	struct do_for_each_ref_help hp = { fn, cb_data };
 
 	iter = refs->be->reflog_iterator_begin(refs);
 
-	return do_for_each_ref_iterator(iter, fn, cb_data);
+	return do_for_each_repo_ref_iterator(the_repository, iter,
+					     do_for_each_ref_helper, &hp);
 }
 
 int for_each_reflog(each_ref_fn fn, void *cb_data)

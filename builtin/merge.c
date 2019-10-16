@@ -6,6 +6,7 @@
  * Based on git-merge.sh by Junio C Hamano.
  */
 
+#define USE_THE_INDEX_COMPATIBILITY_MACROS
 #include "cache.h"
 #include "config.h"
 #include "parse-options.h"
@@ -36,6 +37,7 @@
 #include "packfile.h"
 #include "tag.h"
 #include "alias.h"
+#include "commit-reach.h"
 
 #define DEFAULT_TWOHEAD (1<<0)
 #define DEFAULT_OCTOPUS (1<<1)
@@ -111,12 +113,15 @@ static int option_parse_message(const struct option *opt,
 	return 0;
 }
 
-static int option_read_message(struct parse_opt_ctx_t *ctx,
-			       const struct option *opt, int unset)
+static enum parse_opt_result option_read_message(struct parse_opt_ctx_t *ctx,
+						 const struct option *opt,
+						 const char *arg_not_used,
+						 int unset)
 {
 	struct strbuf *buf = opt->value;
 	const char *arg;
 
+	BUG_ON_OPT_ARG(arg_not_used);
 	if (unset)
 		BUG("-F cannot be negated");
 
@@ -127,7 +132,7 @@ static int option_read_message(struct parse_opt_ctx_t *ctx,
 		ctx->argc--;
 		arg = *++ctx->argv;
 	} else
-		return opterror(opt, "requires a value", 0);
+		return error(_("option `%s' requires a value"), opt->long_name);
 
 	if (buf->len)
 		strbuf_addch(buf, '\n');
@@ -223,6 +228,7 @@ static int option_parse_x(const struct option *opt,
 static int option_parse_n(const struct option *opt,
 			  const char *arg, int unset)
 {
+	BUG_ON_OPT_ARG(arg);
 	show_diffstat = unset;
 	return 0;
 }
@@ -259,7 +265,7 @@ static struct option builtin_merge_options[] = {
 		option_parse_message),
 	{ OPTION_LOWLEVEL_CALLBACK, 'F', "file", &merge_msg, N_("path"),
 		N_("read message from file"), PARSE_OPT_NONEG,
-		(parse_opt_cb *) option_read_message },
+		NULL, 0, option_read_message },
 	OPT__VERBOSITY(&verbosity),
 	OPT_BOOL(0, "abort", &abort_current_merge,
 		N_("abort the current in-progress merge")),
@@ -389,7 +395,7 @@ static void squash_message(struct commit *commit, struct commit_list *remotehead
 
 	printf(_("Squash commit -- not updating HEAD\n"));
 
-	init_revisions(&rev, NULL);
+	repo_init_revisions(the_repository, &rev, NULL);
 	rev.ignore_merges = 1;
 	rev.commit_format = CMIT_FMT_MEDIUM;
 
@@ -452,7 +458,7 @@ static void finish(struct commit *head_commit,
 	}
 	if (new_head && show_diffstat) {
 		struct diff_options opts;
-		diff_setup(&opts);
+		repo_diff_setup(the_repository, &opts);
 		opts.stat_width = -1; /* use full terminal width */
 		opts.stat_graph_width = -1; /* respect statGraphWidth config */
 		opts.output_format |=
@@ -576,7 +582,7 @@ static void parse_branch_merge_options(char *bmo)
 	argc = split_cmdline(bmo, &argv);
 	if (argc < 0)
 		die(_("Bad branch.%s.mergeoptions string: %s"), branch,
-		    split_cmdline_strerror(argc));
+		    _(split_cmdline_strerror(argc)));
 	REALLOC_ARRAY(argv, argc + 2);
 	MOVE_ARRAY(argv + 1, argv, argc + 1);
 	argc++;
@@ -700,7 +706,7 @@ static int try_merge_strategy(const char *strategy, struct commit_list *common,
 			return 2;
 		}
 
-		init_merge_options(&o);
+		init_merge_options(&o, the_repository);
 		if (!strcmp(strategy, "subtree"))
 			o.subtree_shift = "";
 
@@ -728,8 +734,9 @@ static int try_merge_strategy(const char *strategy, struct commit_list *common,
 			die(_("unable to write %s"), get_index_file());
 		return clean ? 0 : 1;
 	} else {
-		return try_merge_command(strategy, xopts_nr, xopts,
-						common, head_arg, remoteheads);
+		return try_merge_command(the_repository,
+					 strategy, xopts_nr, xopts,
+					 common, head_arg, remoteheads);
 	}
 }
 
@@ -894,11 +901,11 @@ static int suggest_conflicts(void)
 	filename = git_path_merge_msg(the_repository);
 	fp = xfopen(filename, "a");
 
-	append_conflicts_hint(&msgbuf);
+	append_conflicts_hint(&the_index, &msgbuf);
 	fputs(msgbuf.buf, fp);
 	strbuf_release(&msgbuf);
 	fclose(fp);
-	rerere(allow_rerere_auto);
+	repo_rerere(the_repository, allow_rerere_auto);
 	printf(_("Automatic merge failed; "
 			"fix conflicts and then commit the result.\n"));
 	return 1;
@@ -910,7 +917,7 @@ static int evaluate_result(void)
 	struct rev_info rev;
 
 	/* Check how many files differ. */
-	init_revisions(&rev, "");
+	repo_init_revisions(the_repository, &rev, "");
 	setup_revisions(0, NULL, &rev, NULL);
 	rev.diffopt.output_format |=
 		DIFF_FORMAT_CALLBACK;
@@ -1189,7 +1196,7 @@ static int merging_a_throwaway_tag(struct commit *commit)
 	tag_ref = xstrfmt("refs/tags/%s",
 			  ((struct tag *)merge_remote_util(commit)->obj)->tag);
 	if (!read_ref(tag_ref, &oid) &&
-	    !oidcmp(&oid, &merge_remote_util(commit)->obj->oid))
+	    oideq(&oid, &merge_remote_util(commit)->obj->oid))
 		is_throwaway_tag = 0;
 	else
 		is_throwaway_tag = 1;
@@ -1334,6 +1341,10 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 			die(_("%s - not something we can merge"), argv[0]);
 		if (remoteheads->next)
 			die(_("Can merge only exactly one commit into empty head"));
+
+		if (verify_signatures)
+			verify_merge_signature(remoteheads->item, verbosity);
+
 		remote_head_oid = &remoteheads->item->object.oid;
 		read_empty(remote_head_oid, 0);
 		update_ref("initial pull", "HEAD", remote_head_oid, NULL, 0,
@@ -1355,31 +1366,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 
 	if (verify_signatures) {
 		for (p = remoteheads; p; p = p->next) {
-			struct commit *commit = p->item;
-			char hex[GIT_MAX_HEXSZ + 1];
-			struct signature_check signature_check;
-			memset(&signature_check, 0, sizeof(signature_check));
-
-			check_commit_signature(commit, &signature_check);
-
-			find_unique_abbrev_r(hex, &commit->object.oid, DEFAULT_ABBREV);
-			switch (signature_check.result) {
-			case 'G':
-				break;
-			case 'U':
-				die(_("Commit %s has an untrusted GPG signature, "
-				      "allegedly by %s."), hex, signature_check.signer);
-			case 'B':
-				die(_("Commit %s has a bad GPG signature "
-				      "allegedly by %s."), hex, signature_check.signer);
-			default: /* 'N' */
-				die(_("Commit %s does not have a GPG signature."), hex);
-			}
-			if (verbosity >= 0 && signature_check.result == 'G')
-				printf(_("Commit %s has a good GPG signature by %s\n"),
-				       hex, signature_check.signer);
-
-			signature_check_clear(&signature_check);
+			verify_merge_signature(p->item, verbosity);
 		}
 	}
 
@@ -1448,7 +1435,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 		goto done;
 	} else if (fast_forward != FF_NO && !remoteheads->next &&
 			!common->next &&
-			!oidcmp(&common->item->object.oid, &head_commit->object.oid)) {
+			oideq(&common->item->object.oid, &head_commit->object.oid)) {
 		/* Again the most common case of merging one remote. */
 		struct strbuf msg = STRBUF_INIT;
 		struct commit *commit;
@@ -1470,7 +1457,8 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 			goto done;
 		}
 
-		if (checkout_fast_forward(&head_commit->object.oid,
+		if (checkout_fast_forward(the_repository,
+					  &head_commit->object.oid,
 					  &commit->object.oid,
 					  overwrite_ignore)) {
 			ret = 1;
@@ -1521,7 +1509,7 @@ int cmd_merge(int argc, const char **argv, const char *prefix)
 			 * HEAD^^" would be missed.
 			 */
 			common_one = get_merge_bases(head_commit, j->item);
-			if (oidcmp(&common_one->item->object.oid, &j->item->object.oid)) {
+			if (!oideq(&common_one->item->object.oid, &j->item->object.oid)) {
 				up_to_date = 0;
 				break;
 			}

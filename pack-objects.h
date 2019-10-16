@@ -5,6 +5,8 @@
 #include "thread-utils.h"
 #include "pack.h"
 
+struct repository;
+
 #define DEFAULT_DELTA_CACHE_SIZE (256 * 1024 * 1024)
 
 #define OE_DFS_STATE_BITS	2
@@ -103,6 +105,7 @@ struct object_entry {
 	unsigned no_try_delta:1;
 	unsigned type_:TYPE_BITS;
 	unsigned in_pack_type:TYPE_BITS; /* could be delta */
+
 	unsigned preferred_base:1; /*
 				    * we do not pack this, but is available
 				    * to be used as the base object to delta
@@ -112,6 +115,7 @@ struct object_entry {
 	unsigned filled:1; /* assigned write-order */
 	unsigned dfs_state:OE_DFS_STATE_BITS;
 	unsigned depth:OE_DEPTH_BITS;
+	unsigned ext_base:1; /* delta_idx points outside packlist */
 
 	/*
 	 * pahole results on 64-bit linux (gcc and clang)
@@ -125,6 +129,7 @@ struct object_entry {
 };
 
 struct packing_data {
+	struct repository *repo;
 	struct object_entry *objects;
 	uint32_t nr_objects, nr_alloc;
 
@@ -143,27 +148,38 @@ struct packing_data {
 	struct packed_git **in_pack_by_idx;
 	struct packed_git **in_pack;
 
-#ifndef NO_PTHREADS
-	pthread_mutex_t lock;
-#endif
+	/*
+	 * During packing with multiple threads, protect the in-core
+	 * object database from concurrent accesses.
+	 */
+	pthread_mutex_t odb_lock;
+
+	/*
+	 * This list contains entries for bases which we know the other side
+	 * has (e.g., via reachability bitmaps), but which aren't in our
+	 * "objects" list.
+	 */
+	struct object_entry *ext_bases;
+	uint32_t nr_ext, alloc_ext;
 
 	uintmax_t oe_size_limit;
 	uintmax_t oe_delta_size_limit;
+
+	/* delta islands */
+	unsigned int *tree_depth;
+	unsigned char *layer;
 };
 
-void prepare_packing_data(struct packing_data *pdata);
+void prepare_packing_data(struct repository *r, struct packing_data *pdata);
 
+/* Protect access to object database */
 static inline void packing_data_lock(struct packing_data *pdata)
 {
-#ifndef NO_PTHREADS
-	pthread_mutex_lock(&pdata->lock);
-#endif
+	pthread_mutex_lock(&pdata->odb_lock);
 }
 static inline void packing_data_unlock(struct packing_data *pdata)
 {
-#ifndef NO_PTHREADS
-	pthread_mutex_unlock(&pdata->lock);
-#endif
+	pthread_mutex_unlock(&pdata->odb_lock);
 }
 
 struct object_entry *packlist_alloc(struct packing_data *pdata,
@@ -231,14 +247,14 @@ static inline struct packed_git *oe_in_pack(const struct packing_data *pack,
 		return pack->in_pack[e - pack->objects];
 }
 
-void oe_map_new_pack(struct packing_data *pack,
-		     struct packed_git *p);
+void oe_map_new_pack(struct packing_data *pack);
+
 static inline void oe_set_in_pack(struct packing_data *pack,
 				  struct object_entry *e,
 				  struct packed_git *p)
 {
 	if (!p->index)
-		oe_map_new_pack(pack, p);
+		oe_map_new_pack(pack);
 	if (pack->in_pack_by_idx)
 		e->in_pack_idx = p->index;
 	else
@@ -249,9 +265,12 @@ static inline struct object_entry *oe_delta(
 		const struct packing_data *pack,
 		const struct object_entry *e)
 {
-	if (e->delta_idx)
+	if (!e->delta_idx)
+		return NULL;
+	if (e->ext_base)
+		return &pack->ext_bases[e->delta_idx - 1];
+	else
 		return &pack->objects[e->delta_idx - 1];
-	return NULL;
 }
 
 static inline void oe_set_delta(struct packing_data *pack,
@@ -263,6 +282,10 @@ static inline void oe_set_delta(struct packing_data *pack,
 	else
 		e->delta_idx = 0;
 }
+
+void oe_set_delta_ext(struct packing_data *pack,
+		      struct object_entry *e,
+		      const unsigned char *sha1);
 
 static inline struct object_entry *oe_delta_child(
 		const struct packing_data *pack,
@@ -356,7 +379,7 @@ static inline unsigned long oe_delta_size(struct packing_data *pack,
 		return e->delta_size_;
 
 	/*
-	 * pack->detla_size[] can't be NULL because oe_set_delta_size()
+	 * pack->delta_size[] can't be NULL because oe_set_delta_size()
 	 * must have been called when a new delta is saved with
 	 * oe_set_delta().
 	 * If oe_delta() returns NULL (i.e. default state, which means
@@ -382,6 +405,40 @@ static inline void oe_set_delta_size(struct packing_data *pack,
 		pack->delta_size[e - pack->objects] = size;
 		e->delta_size_valid = 0;
 	}
+}
+
+static inline unsigned int oe_tree_depth(struct packing_data *pack,
+					 struct object_entry *e)
+{
+	if (!pack->tree_depth)
+		return 0;
+	return pack->tree_depth[e - pack->objects];
+}
+
+static inline void oe_set_tree_depth(struct packing_data *pack,
+				     struct object_entry *e,
+				     unsigned int tree_depth)
+{
+	if (!pack->tree_depth)
+		CALLOC_ARRAY(pack->tree_depth, pack->nr_alloc);
+	pack->tree_depth[e - pack->objects] = tree_depth;
+}
+
+static inline unsigned char oe_layer(struct packing_data *pack,
+				     struct object_entry *e)
+{
+	if (!pack->layer)
+		return 0;
+	return pack->layer[e - pack->objects];
+}
+
+static inline void oe_set_layer(struct packing_data *pack,
+				struct object_entry *e,
+				unsigned char layer)
+{
+	if (!pack->layer)
+		CALLOC_ARRAY(pack->layer, pack->nr_alloc);
+	pack->layer[e - pack->objects] = layer;
 }
 
 #endif

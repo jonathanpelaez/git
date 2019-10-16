@@ -3,6 +3,7 @@
  *
  * Copyright (C) Linus Torvalds 2006
  */
+#define USE_THE_INDEX_COMPATIBILITY_MACROS
 #include "builtin.h"
 #include "config.h"
 #include "lockfile.h"
@@ -180,7 +181,7 @@ static int check_local_mod(struct object_id *head, int index_only)
 		if (no_head
 		     || get_tree_entry(head, name, &oid, &mode)
 		     || ce->ce_mode != create_ce_mode(mode)
-		     || oidcmp(&ce->oid, &oid))
+		     || !oideq(&ce->oid, &oid))
 			staged_changes = 1;
 
 		/*

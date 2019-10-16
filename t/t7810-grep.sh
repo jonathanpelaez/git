@@ -119,33 +119,33 @@ do
 		test_cmp expected actual
 	'
 
-	test_expect_success "grep -w $L (with --column, --invert)" '
+	test_expect_success "grep -w $L (with --column, --invert-match)" '
 		{
 			echo ${HC}file:1:foo mmap bar
 			echo ${HC}file:1:foo_mmap bar
 			echo ${HC}file:1:foo_mmap bar mmap
 			echo ${HC}file:1:foo mmap bar_mmap
 		} >expected &&
-		git grep --column --invert -w -e baz $H -- file >actual &&
+		git grep --column --invert-match -w -e baz $H -- file >actual &&
 		test_cmp expected actual
 	'
 
-	test_expect_success "grep $L (with --column, --invert, extended OR)" '
+	test_expect_success "grep $L (with --column, --invert-match, extended OR)" '
 		{
 			echo ${HC}hello_world:6:HeLLo_world
 		} >expected &&
-		git grep --column --invert -e ll --or --not -e _ $H -- hello_world \
+		git grep --column --invert-match -e ll --or --not -e _ $H -- hello_world \
 			>actual &&
 		test_cmp expected actual
 	'
 
-	test_expect_success "grep $L (with --column, --invert, extended AND)" '
+	test_expect_success "grep $L (with --column, --invert-match, extended AND)" '
 		{
 			echo ${HC}hello_world:3:Hello world
 			echo ${HC}hello_world:3:Hello_world
 			echo ${HC}hello_world:6:HeLLo_world
 		} >expected &&
-		git grep --column --invert --not -e _ --and --not -e ll $H -- hello_world \
+		git grep --column --invert-match --not -e _ --and --not -e ll $H -- hello_world \
 			>actual &&
 		test_cmp expected actual
 	'
@@ -309,6 +309,8 @@ do
 			echo ${HC}v:1:vvv
 		} >expected &&
 		git grep --max-depth -1 -n -e vvv $H >actual &&
+		test_cmp expected actual &&
+		git grep --recursive -n -e vvv $H >actual &&
 		test_cmp expected actual
 	'
 
@@ -317,6 +319,8 @@ do
 			echo ${HC}v:1:vvv
 		} >expected &&
 		git grep --max-depth 0 -n -e vvv $H >actual &&
+		test_cmp expected actual &&
+		git grep --no-recursive -n -e vvv $H >actual &&
 		test_cmp expected actual
 	'
 
@@ -327,6 +331,8 @@ do
 			echo ${HC}v:1:vvv
 		} >expected &&
 		git grep --max-depth 0 -n -e vvv $H -- "*" >actual &&
+		test_cmp expected actual &&
+		git grep --no-recursive -n -e vvv $H -- "*" >actual &&
 		test_cmp expected actual
 	'
 
@@ -344,6 +350,8 @@ do
 			echo ${HC}t/v:1:vvv
 		} >expected &&
 		git grep --max-depth 0 -n -e vvv $H -- t >actual &&
+		test_cmp expected actual &&
+		git grep --no-recursive -n -e vvv $H -- t >actual &&
 		test_cmp expected actual
 	'
 
@@ -353,6 +361,8 @@ do
 			echo ${HC}v:1:vvv
 		} >expected &&
 		git grep --max-depth 0 -n -e vvv $H -- . t >actual &&
+		test_cmp expected actual &&
+		git grep --no-recursive -n -e vvv $H -- . t >actual &&
 		test_cmp expected actual
 	'
 
@@ -362,6 +372,8 @@ do
 			echo ${HC}v:1:vvv
 		} >expected &&
 		git grep --max-depth 0 -n -e vvv $H -- t . >actual &&
+		test_cmp expected actual &&
+		git grep --no-recursive -n -e vvv $H -- t . >actual &&
 		test_cmp expected actual
 	'
 	test_expect_success "grep $L with grep.extendedRegexp=false" '
@@ -998,7 +1010,7 @@ test_expect_success 'outside of git repository' '
 			echo ".gitignore:.*o*" &&
 			cat ../expect.full
 		} >../expect.with.ignored &&
-		git grep --no-index --no-exclude o >../actual.full &&
+		git grep --no-index --no-exclude-standard o >../actual.full &&
 		test_cmp ../expect.with.ignored ../actual.full
 	)
 '
@@ -1039,7 +1051,7 @@ test_expect_success 'outside of git repository with fallbackToNoIndex' '
 			echo ".gitignore:.*o*" &&
 			cat ../expect.full
 		} >../expect.with.ignored &&
-		git -c grep.fallbackToNoIndex grep --no-exclude o >../actual.full &&
+		git -c grep.fallbackToNoIndex grep --no-exclude-standard o >../actual.full &&
 		test_cmp ../expect.with.ignored ../actual.full
 	)
 '

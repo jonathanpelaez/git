@@ -589,6 +589,12 @@ test_expect_success 'excessive subject' '
 	ls patches/0004-This-is-an-excessively-long-subject-line-for-a-messa.patch
 '
 
+test_expect_success 'failure to write cover-letter aborts gracefully' '
+	test_when_finished "rmdir 0000-cover-letter.patch" &&
+	mkdir 0000-cover-letter.patch &&
+	test_must_fail git format-patch --no-renames --cover-letter -1
+'
+
 test_expect_success 'cover-letter inherits diff options' '
 	git mv file foo &&
 	git commit -m foo &&
@@ -1714,6 +1720,40 @@ test_expect_success 'format-patch --pretty=mboxrd' '
 	git format-patch --pretty=mboxrd --stdout -1 $C~1..$C >patch &&
 	git grep -h --no-index -A11 \
 		"^>From could trip up a loose mbox parser" patch >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'interdiff: setup' '
+	git checkout -b boop master &&
+	test_commit fnorp blorp &&
+	test_commit fleep blorp
+'
+
+test_expect_success 'interdiff: cover-letter' '
+	sed "y/q/ /" >expect <<-\EOF &&
+	+fleep
+	--q
+	EOF
+	git format-patch --cover-letter --interdiff=boop~2 -1 boop &&
+	test_i18ngrep "^Interdiff:$" 0000-cover-letter.patch &&
+	test_i18ngrep ! "^Interdiff:$" 0001-fleep.patch &&
+	sed "1,/^@@ /d; /^-- $/q" <0000-cover-letter.patch >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'interdiff: reroll-count' '
+	git format-patch --cover-letter --interdiff=boop~2 -v2 -1 boop &&
+	test_i18ngrep "^Interdiff ..* v1:$" v2-0000-cover-letter.patch
+'
+
+test_expect_success 'interdiff: solo-patch' '
+	cat >expect <<-\EOF &&
+	  +fleep
+
+	EOF
+	git format-patch --interdiff=boop~2 -1 boop &&
+	test_i18ngrep "^Interdiff:$" 0001-fleep.patch &&
+	sed "1,/^  @@ /d; /^$/q" <0001-fleep.patch >actual &&
 	test_cmp expect actual
 '
 

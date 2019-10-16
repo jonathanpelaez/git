@@ -10,7 +10,6 @@
 #include "fsck.h"
 #include "refs.h"
 #include "utf8.h"
-#include "sha1-array.h"
 #include "decorate.h"
 #include "oidset.h"
 #include "packfile.h"
@@ -67,6 +66,8 @@ static struct oidset gitmodules_done = OIDSET_INIT;
 	FUNC(GITMODULES_LARGE, ERROR) \
 	FUNC(GITMODULES_NAME, ERROR) \
 	FUNC(GITMODULES_SYMLINK, ERROR) \
+	FUNC(GITMODULES_URL, ERROR) \
+	FUNC(GITMODULES_PATH, ERROR) \
 	/* warnings */ \
 	FUNC(BAD_FILEMODE, WARN) \
 	FUNC(EMPTY_NAME, WARN) \
@@ -182,40 +183,37 @@ static int fsck_msg_type(enum fsck_msg_id msg_id,
 
 static void init_skiplist(struct fsck_options *options, const char *path)
 {
-	static struct oid_array skiplist = OID_ARRAY_INIT;
-	int sorted, fd;
-	char buffer[GIT_MAX_HEXSZ + 1];
+	FILE *fp;
+	struct strbuf sb = STRBUF_INIT;
 	struct object_id oid;
 
-	if (options->skiplist)
-		sorted = options->skiplist->sorted;
-	else {
-		sorted = 1;
-		options->skiplist = &skiplist;
-	}
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0)
+	fp = fopen(path, "r");
+	if (!fp)
 		die("Could not open skip list: %s", path);
-	for (;;) {
+	while (!strbuf_getline(&sb, fp)) {
 		const char *p;
-		int result = read_in_full(fd, buffer, sizeof(buffer));
-		if (result < 0)
-			die_errno("Could not read '%s'", path);
-		if (!result)
-			break;
-		if (parse_oid_hex(buffer, &oid, &p) || *p != '\n')
-			die("Invalid SHA-1: %s", buffer);
-		oid_array_append(&skiplist, &oid);
-		if (sorted && skiplist.nr > 1 &&
-				oidcmp(&skiplist.oid[skiplist.nr - 2],
-				       &oid) > 0)
-			sorted = 0;
-	}
-	close(fd);
+		const char *hash;
 
-	if (sorted)
-		skiplist.sorted = 1;
+		/*
+		 * Allow trailing comments, leading whitespace
+		 * (including before commits), and empty or whitespace
+		 * only lines.
+		 */
+		hash = strchr(sb.buf, '#');
+		if (hash)
+			strbuf_setlen(&sb, hash - sb.buf);
+		strbuf_trim(&sb);
+		if (!sb.len)
+			continue;
+
+		if (parse_oid_hex(sb.buf, &oid, &p) || *p != '\0')
+			die("Invalid SHA-1: %s", sb.buf);
+		oidset_insert(&options->skiplist, &oid);
+	}
+	if (ferror(fp))
+		die_errno("Could not read '%s'", path);
+	fclose(fp);
+	strbuf_release(&sb);
 }
 
 static int parse_msg_type(const char *str)
@@ -320,9 +318,7 @@ static void append_msg_id(struct strbuf *sb, const char *msg_id)
 
 static int object_on_skiplist(struct fsck_options *opts, struct object *obj)
 {
-	if (opts && opts->skiplist && obj)
-		return oid_array_lookup(opts->skiplist, &obj->oid) >= 0;
-	return 0;
+	return opts && obj && oidset_contains(&opts->skiplist, &obj->oid);
 }
 
 __attribute__((format (printf, 4, 5)))
@@ -414,14 +410,14 @@ static int fsck_walk_tree(struct tree *tree, void *data, struct fsck_options *op
 			continue;
 
 		if (S_ISDIR(entry.mode)) {
-			obj = (struct object *)lookup_tree(the_repository, entry.oid);
+			obj = (struct object *)lookup_tree(the_repository, &entry.oid);
 			if (name && obj)
 				put_object_name(options, obj, "%s%s/", name,
 					entry.path);
 			result = options->walk(obj, OBJ_TREE, data, options);
 		}
 		else if (S_ISREG(entry.mode) || S_ISLNK(entry.mode)) {
-			obj = (struct object *)lookup_blob(the_repository, entry.oid);
+			obj = (struct object *)lookup_blob(the_repository, &entry.oid);
 			if (name && obj)
 				put_object_name(options, obj, "%s%s", name,
 					entry.path);
@@ -483,7 +479,7 @@ static int fsck_walk_commit(struct commit *commit, void *data, struct fsck_optio
 		if (name) {
 			struct object *obj = &parents->item->object;
 
-			if (++counter > 1)
+			if (counter++)
 				put_object_name(options, obj, "%s^%d",
 					name, counter);
 			else if (generation > 0)
@@ -992,6 +988,18 @@ static int fsck_gitmodules_fn(const char *var, const char *value, void *vdata)
 				    FSCK_MSG_GITMODULES_NAME,
 				    "disallowed submodule name: %s",
 				    name);
+	if (!strcmp(key, "url") && value &&
+	    looks_like_command_line_option(value))
+		data->ret |= report(data->options, data->obj,
+				    FSCK_MSG_GITMODULES_URL,
+				    "disallowed submodule url: %s",
+				    value);
+	if (!strcmp(key, "path") && value &&
+	    looks_like_command_line_option(value))
+		data->ret |= report(data->options, data->obj,
+				    FSCK_MSG_GITMODULES_PATH,
+				    "disallowed submodule path: %s",
+				    value);
 	free(name);
 
 	return 0;
